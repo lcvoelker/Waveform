@@ -1,0 +1,98 @@
+# import socket
+# import time
+# import json
+#
+# # Server settings
+# HOST = "127.0.0.1"  # Localhost (same PC as UE5)
+# PORT = 5000  # Port number (must match UE5)
+#
+# # Create a TCP socket
+# server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+# server_socket.bind((HOST, PORT))
+# server_socket.listen(1)  # Allow only one connection
+#
+# print(f"Waiting for a connection on {HOST}:{PORT}...")
+# conn, addr = server_socket.accept()
+# print(f"Connected to {addr}")
+#
+# try:
+#     while True:
+#         # Example test data (simulated frequency values)
+#         test_data = {
+#             "bass": 0.8,
+#             "mid": 0.5,
+#             "treble": 0.3
+#         }
+#         json_data = json.dumps(test_data)  # Convert to JSON format
+#         conn.sendall(json_data.encode("utf-8"))  # Send data as bytes
+#
+#         print(f"Sent to UE5: {json_data}")
+#         time.sleep(1)  # Send every second
+#
+# except KeyboardInterrupt:
+#     print("Closing connection.")
+#     conn.close()
+#     server_socket.close()
+
+import numpy as np
+import sounddevice as sd
+import socket
+import json
+import time
+
+# 🎧 Audio Settings
+SAMPLE_RATE = 44100  # Standard sample rate (CD quality)
+BUFFER_SIZE = 735    # Custom buffer size for ~60 updates/sec
+
+# 🎮 Socket Setup (Send to UE5)
+HOST = "127.0.0.1"  # Localhost (same PC as UE5)
+PORT = 5000         # Port number (must match UE5)
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.bind((HOST, PORT))
+sock.listen(1)
+
+print(f"Waiting for UE5 connection on {HOST}:{PORT}...")
+conn, addr = sock.accept()
+print(f"Connected to UE5: {addr}")
+
+def process_audio(audio_data):
+    """ Perform FFT and send frequency data to UE5 """
+    fft_result = np.abs(np.fft.rfft(audio_data))  # Perform FFT
+    frequencies = np.fft.rfftfreq(len(audio_data), d=1/SAMPLE_RATE)
+
+    # 🎵 Define frequency bands
+    bands = {
+        "bass": (20, 250),
+        "mid": (250, 2000),
+        "treble": (2000, 20000)
+    }
+
+    # Calculate average amplitude per band
+    band_values = {band: np.mean(fft_result[(frequencies >= low) & (frequencies < high)])
+                   for band, (low, high) in bands.items()}
+
+    # Normalize values (to prevent extreme fluctuations)
+    max_value = max(band_values.values(), default=1)
+    if max_value > 0:
+        band_values = {band: value / max_value for band, value in band_values.items()}
+
+    # Send data to UE5
+    json_data = json.dumps({band: float(value) for band, value in band_values.items()})
+    conn.sendall(json_data.encode("utf-8"))
+
+def audio_callback(indata, frames, time, status):
+    """ Callback function that processes audio at 60 Hz """
+    if status:
+        print(status)
+    audio_data = np.frombuffer(indata, dtype=np.float32)  # Convert to NumPy array
+    process_audio(audio_data)
+
+# 🔄 Start Real-Time Audio Stream (System Output)
+with sd.InputStream(callback=audio_callback, channels=1, samplerate=SAMPLE_RATE, blocksize=BUFFER_SIZE):
+    try:
+        while True:
+            time.sleep(1/60)  # Ensure 60 updates per second
+    except KeyboardInterrupt:
+        print("Closing connection.")
+        conn.close()
+        sock.close()
